@@ -7,7 +7,7 @@ import openai
 import asyncio
 import json
 import re
-from supabase import create_client, Client
+## from supabase import create_client, Client
 import PyPDF2
 import io
 from dotenv import load_dotenv
@@ -28,7 +28,7 @@ NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
 NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"
 NVIDIA_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -104,13 +104,7 @@ async def score_resume(
     if len(resume_text) < 100:
         raise HTTPException(status_code=422, detail="Resume appears to be empty or unreadable.")
 
-    # Save resume to Supabase
-    resume_id = str(uuid.uuid4())
-    supabase.table("resumes").insert({
-        "id": resume_id,
-        "filename": file.filename,
-        "raw_text": resume_text[:10000],
-    }).execute()
+
 
     # Build scoring prompt
     job_context = ""
@@ -158,40 +152,12 @@ Return ONLY the JSON object. No other text.
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI scoring failed: {str(e)}")
 
-    # Save score to Supabase
-    score_id = str(uuid.uuid4())
-    supabase.table("scores").insert({
-        "id": score_id,
-        "resume_id": resume_id,
-        "overall_score": score_data.get("overall_score"),
-        "ats_score": score_data.get("ats_score"),
-        "skills_score": score_data.get("skills_score"),
-        "experience_score": score_data.get("experience_score"),
-        "formatting_score": score_data.get("formatting_score"),
-        "grammar_score": score_data.get("grammar_score"),
-        "feedback": score_data.get("feedback"),
-        "strengths": score_data.get("strengths", []),
-        "weaknesses": score_data.get("weaknesses", []),
-        "suggestions": score_data.get("suggestions", []),
-        "model_used": NVIDIA_MODEL,
-    }).execute()
 
-    # Save job match if present
-    if job_context and "job_match" in score_data:
-        jm = score_data["job_match"]
-        supabase.table("job_matches").insert({
-            "resume_id": resume_id,
-            "job_title": job_title,
-            "job_description": (job_description or "")[:2000],
-            "match_score": jm.get("match_score"),
-            "matched_keywords": jm.get("matched_keywords", []),
-            "missing_keywords": jm.get("missing_keywords", []),
-        }).execute()
+
+
 
     return JSONResponse({
         "success": True,
-        "resume_id": resume_id,
-        "score_id": score_id,
         "filename": file.filename,
         "scores": {
             "overall": score_data.get("overall_score"),
@@ -209,17 +175,3 @@ Return ONLY the JSON object. No other text.
     })
 
 
-@app.get("/api/results/{resume_id}")
-async def get_results(resume_id: str):
-    resume = supabase.table("resumes").select("*").eq("id", resume_id).single().execute()
-    if not resume.data:
-        raise HTTPException(status_code=404, detail="Resume not found.")
-
-    scores = supabase.table("scores").select("*").eq("resume_id", resume_id).order("scored_at", desc=True).limit(1).execute()
-    job_match = supabase.table("job_matches").select("*").eq("resume_id", resume_id).limit(1).execute()
-
-    return {
-        "resume": resume.data,
-        "scores": scores.data[0] if scores.data else None,
-        "job_match": job_match.data[0] if job_match.data else None,
-    }
