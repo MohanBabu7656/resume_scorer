@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
 import uuid
-import httpx
+import openai
 import json
 import re
 from supabase import create_client, Client
@@ -23,8 +23,8 @@ app.add_middleware(
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
-NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct"
+NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"
+NVIDIA_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -38,13 +38,13 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 
 async def call_nvidia_api(prompt: str) -> str:
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": NVIDIA_MODEL,
-        "messages": [
+    client = openai.OpenAI(
+        base_url=NVIDIA_API_BASE,
+        api_key=NVIDIA_API_KEY
+    )
+    response = await client.chat.completions.create(
+        model=NVIDIA_MODEL,
+        messages=[
             {
                 "role": "system",
                 "content": (
@@ -54,14 +54,10 @@ async def call_nvidia_api(prompt: str) -> str:
             },
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 2048,
-        "temperature": 0.3,
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(NVIDIA_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        max_tokens=2048,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content
 
 
 def parse_json_response(raw: str) -> dict:
