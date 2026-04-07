@@ -4,12 +4,14 @@ from fastapi.responses import JSONResponse
 import os
 import uuid
 import openai
+import asyncio
 import json
 import re
 from supabase import create_client, Client
 import PyPDF2
 import io
-
+from dotenv import load_dotenv
+load_dotenv()
 app = FastAPI(title="Resume Scorer API", version="1.0.0")
 
 app.add_middleware(
@@ -42,21 +44,24 @@ async def call_nvidia_api(prompt: str) -> str:
         base_url=NVIDIA_API_BASE,
         api_key=NVIDIA_API_KEY
     )
-    response = await client.chat.completions.create(
-        model=NVIDIA_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert resume reviewer and ATS specialist. "
-                    "Always respond ONLY with valid JSON. No markdown, no explanation outside JSON."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=2048,
-        temperature=0.3,
-    )
+    loop = asyncio.get_running_loop()
+    def sync_create():
+        return client.chat.completions.create(
+            model=NVIDIA_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert resume reviewer and ATS specialist. "
+                        "Always respond ONLY with valid JSON. No markdown, no explanation outside JSON."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=2048,
+            temperature=0.3,
+        )
+    response = await loop.run_in_executor(None, sync_create)
     return response.choices[0].message.content
 
 
