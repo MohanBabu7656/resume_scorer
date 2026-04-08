@@ -173,6 +173,18 @@ async def validate_inputs(resume_text: str, job_title: str = None, job_descripti
         return {"safe": False, "reasons": [f"Validation call failed: {str(e)}"], "categories": {}}
 
 
+def get_letter_grade(score: float) -> str:
+    """Convert a numeric score (0-100) to a letter grade."""
+    if score >= 95: return "A+"
+    elif score >= 90: return "A"
+    elif score >= 85: return "B+"
+    elif score >= 80: return "B"
+    elif score >= 75: return "C+"
+    elif score >= 70: return "C"
+    elif score >= 60: return "D"
+    else: return "F"
+
+
 @app.get("/")
 def root():
     return {"message": "Resume Scorer API is running 🚀", "version": "1.0.0"}
@@ -181,6 +193,18 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.get("/api/privacy-policy")
+def privacy_policy():
+    return {
+        "title": "Data Privacy and Usage Policy",
+        "data_collection": "We temporarily process the resume PDF, job title, and job description you provide.",
+        "data_usage": "Your data is used exclusively to score your resume and evaluate its match against the provided job context using our AI models.",
+        "data_retention": "Uploaded files and extracted texts are processed in memory for the duration of the request and are not permanently stored on our servers.",
+        "third_party_sharing": "Your data is sent securely to our AI providers (like NVIDIA APIs) strictly for immediate processing. It is not used to train their foundational models, nor is it sold to third parties.",
+        "security": "We use advanced AI safety filters (Llama Guard) and secure API endpoints to ensure your data is processed safely and securely."
+    }
 
 
 @app.post("/api/score-resume")
@@ -296,11 +320,14 @@ Return ONLY the JSON object. No other text.
 
 
 
+    overall_score = score_data.get("overall_score", 0)
+
     return JSONResponse({
         "success": True,
         "filename": file.filename,
+        "grade": get_letter_grade(overall_score),
         "scores": {
-            "overall": score_data.get("overall_score"),
+            "overall": overall_score,
             "ats": score_data.get("ats_score"),
             "skills": score_data.get("skills_score"),
             "experience": score_data.get("experience_score"),
