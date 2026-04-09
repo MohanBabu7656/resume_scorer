@@ -282,13 +282,15 @@ async def process_resume_scoring(
     words_per_page = words / max(1, num_pages)
     word_count_optimal = (200 <= words_per_page <= 800) and (200 <= words <= 2000)
 
-    # 5. Use LLM Guard to strictly check if the text is actually a resume
-    is_resume, reason = await check_is_resume_llm(resume_text)
+    # 5 & 6. Run LLM Guard and AI safety validation concurrently to save time
+    check_task = check_is_resume_llm(resume_text)
+    validate_task = validate_inputs(resume_text, job_title, job_description)
+    
+    (is_resume, reason), validation = await asyncio.gather(check_task, validate_task)
+
     if not is_resume:
         raise HTTPException(status_code=422, detail=f"The uploaded document is not a valid resume. AI Guard explanation: {reason}")
 
-    # 6. Validate inputs using AI safety validator before proceeding
-    validation = await validate_inputs(resume_text, job_title, job_description)
     if not validation.get("safe", False):
         categories = validation.get("categories", {})
         flagged_cats = set(categories.keys())
@@ -340,6 +342,14 @@ Analyze this resume and return a JSON object with the following structure:
     "grammar": "..."
   }}{",\n  \"job_match\": {{\"match_score\": 0, \"matched_keywords\": [], \"missing_keywords\": []}}" if job_context else ""}
 }}
+
+IMPORTANT INSTRUCTIONS FOR SUGGESTIONS:
+1. FOCUS ONLY on substantive content improvements (e.g., adding quantifiable metrics, using stronger action verbs, improving descriptions for impact).
+2. IGNORE spacing, punctuation, and minor formatting errors. Do not suggest removing double colons (::), extra spaces, special characters, or PDF text extraction artifacts.
+3. NEVER suggest changing factual information such as dates, names, or locations (e.g., do not suggest changing "May 2025" to "Mar 2024").
+4. EMPLOYMENT GAPS & OVERLAPS: Carefully analyze the chronological work history. If there are significant unexplained gaps (e.g., >6 months) or overlapping dates that seem erroneous, provide a specific suggestion to clarify or format them better, but do not invent dates.
+5. TAILOR SUGGESTIONS: If the resume lacks a dedicated "Skills" section, suggest adding one. If it lacks a "Summary" or "Objective" and could benefit from it, suggest it. If bullets are too passive (e.g., "Responsible for"), suggest active verbs (e.g., "Spearheaded").
+6. AVOID NITPICKING: Only provide high-value suggestions. If a bullet is already good, do not suggest minor stylistic tweaks.
 
 Resume Text:
 {resume_text[:5000]}
