@@ -143,7 +143,18 @@ async def ai_call_with_retries(prompt: str, system_content: str = None, model: s
 async def check_is_resume_llm(resume_text: str) -> tuple[bool, str]:
     """Use an LLM to strictly classify if the text is a resume or not."""
     snippet = resume_text[:2000]
-    prompt = f"Analyze the following text and determine if it represents a resume (curriculum vitae). If it is a recipe, code snippet, random article, or anything else, it should be false.\n\nText:\n{snippet}\n\nRespond ONLY with a JSON object in this exact format:\n{{\n  \"is_resume\": true or false,\n  \"reason\": \"<brief explanation>\"\n}}"
+    prompt = f"""Analyze the following text and determine if it represents a resume (curriculum vitae). 
+A valid resume MUST contain professional work history/experience, education details, or a detailed list of professional skills.
+If the document is ONLY a certificate of completion, an award, a cover letter, a job description, an ID card, a recipe, a code snippet, or a random article, it is NOT a resume and you must return false.
+
+Text:
+{snippet}
+
+Respond ONLY with a JSON object in this exact format:
+{{
+  "is_resume": true or false,
+  "reason": "<brief explanation>"
+}}"""
     
     try:
         raw = await call_nvidia_api(
@@ -263,6 +274,10 @@ async def process_resume_scoring(
 
     # 4. Word count and stats calculation
     words = len(resume_text.split())
+    
+    if words < 40:
+        raise HTTPException(status_code=422, detail="The uploaded document is too short to be a valid resume. A resume must contain detailed work experience, education history, or professional skills.")
+
     # General rule of thumb: ~200-800 words per page is a healthy range
     words_per_page = words / max(1, num_pages)
     word_count_optimal = (200 <= words_per_page <= 800) and (200 <= words <= 2000)
