@@ -31,14 +31,13 @@ AI_MAX_RETRIES = 3
 RETRY_BASE_SECONDS = 1
 
 
-
-
-def extract_text_from_pdf(file_bytes: bytes) -> str:
+def extract_text_from_pdf(file_bytes: bytes) -> tuple[str, int]:
     reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
     text = ""
+    num_pages = len(reader.pages)
     for page in reader.pages:
         text += page.extract_text() or ""
-    return text.strip()
+    return text.strip(), num_pages
 
 
 async def call_nvidia_api(prompt: str, system_content: str = None, model: str = None) -> str:
@@ -105,9 +104,17 @@ def validate_score_schema(obj: dict) -> (bool, str):
     if "feedback" not in obj or not isinstance(obj["feedback"], dict):
         return False, "missing or invalid 'feedback'"
     # lists
-    for list_key in ("strengths", "weaknesses", "suggestions"):
+    for list_key in ("strengths", "weaknesses"):
         if list_key in obj and not isinstance(obj[list_key], list):
             return False, f"'{list_key}' must be a list"
+    
+    if "suggestions" in obj:
+        if not isinstance(obj["suggestions"], list):
+            return False, "'suggestions' must be a list"
+        for item in obj["suggestions"]:
+            if not isinstance(item, dict) or "current" not in item or "suggested" not in item:
+                return False, "'suggestions' items must be objects with 'current' and 'suggested' keys"
+
     return True, ""
 
 
@@ -131,6 +138,24 @@ async def ai_call_with_retries(prompt: str, system_content: str = None, model: s
                 continue
             # exhausted
             raise last_exc
+
+
+async def check_is_resume_llm(resume_text: str) -> tuple[bool, str]:
+    """Use an LLM to strictly classify if the text is a resume or not."""
+    snippet = resume_text[:2000]
+    prompt = f"Analyze the following text and determine if it represents a resume (curriculum vitae). If it is a recipe, code snippet, random article, or anything else, it should be false.\n\nText:\n{snippet}\n\nRespond ONLY with a JSON object in this exact format:\n{{\n  \"is_resume\": true or false,\n  \"reason\": \"<brief explanation>\"\n}}"
+    
+    try:
+        raw = await call_nvidia_api(
+            prompt=prompt,
+            system_content="You are a strict document classifier. You must only output valid JSON.",
+            model=NVIDIA_MODEL
+        )
+        parsed = parse_json_response(raw)
+        return parsed.get("is_resume", True), parsed.get("reason", "Unknown reason.")
+    except Exception as e:
+        # Fallback to True if the LLM classification itself errors out to not block users
+        return True, ""
 
 
 async def validate_inputs(resume_text: str, job_title: str = None, job_description: str = None) -> dict:
@@ -207,47 +232,51 @@ def privacy_policy():
     }
 
 
-@app.post("/api/score-resume")
-async def score_resume(
-    file: UploadFile = File(...),
-    job_title: str = Form(None),
-    job_description: str = Form(None),
+async def process_resume_scoring(
+    file: UploadFile,
+    job_title: str = None,
+    job_description: str = None,
 ):
-    # 1. Validate Job Context logic before doing any heavy I/O or AI processing
-    if job_description and not job_title:
-        raise HTTPException(status_code=400, detail="Job title is required when a job description is provided.")
-    if job_title and not job_description:
-        raise HTTPException(status_code=400, detail="Job description is required when a job title is provided.")
-
-    # 2. Validate file type
+    # 1. Validate file type
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # 3. Validate file size
+    # 2. Validate file size
     file_bytes = await file.read()
     if len(file_bytes) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Max 5MB.")
 
-    # Extract text
+    if not file_bytes.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="The uploaded file is not a valid PDF document.")
+
+    # 3. Extract text
     try:
-        resume_text = extract_text_from_pdf(file_bytes)
+        resume_text, num_pages = extract_text_from_pdf(file_bytes)
     except Exception:
-        raise HTTPException(status_code=422, detail="Could not extract text from PDF.")
+        raise HTTPException(status_code=422, detail="Could not extract text from PDF. The file may be corrupted or password-protected.")
 
     if len(resume_text) < 100:
-        raise HTTPException(status_code=422, detail="Resume appears to be empty or unreadable.")
+        raise HTTPException(status_code=422, detail="Resume appears to be empty or unreadable. Please ensure the PDF contains selectable text, not just images.")
 
-    # Validate inputs using AI safety validator before proceeding
+    if len(resume_text) > 20000:
+        raise HTTPException(status_code=422, detail="Resume text is too long. Please ensure your resume is concise (max ~5-6 pages of text).")
+
+    # 4. Word count and stats calculation
+    words = len(resume_text.split())
+    # General rule of thumb: ~200-800 words per page is a healthy range
+    words_per_page = words / max(1, num_pages)
+    word_count_optimal = (200 <= words_per_page <= 800) and (200 <= words <= 2000)
+
+    # 5. Use LLM Guard to strictly check if the text is actually a resume
+    is_resume, reason = await check_is_resume_llm(resume_text)
+    if not is_resume:
+        raise HTTPException(status_code=422, detail=f"The uploaded document is not a valid resume. AI Guard explanation: {reason}")
+
+    # 6. Validate inputs using AI safety validator before proceeding
     validation = await validate_inputs(resume_text, job_title, job_description)
     if not validation.get("safe", False):
         categories = validation.get("categories", {})
         flagged_cats = set(categories.keys())
-
-        # Llama Guard 4 Categories allowed for Resume Parsing:
-        # S7: Privacy (Resumes have PII like emails/phones)
-        # S10: Hate (Job Descriptions might be discriminatory like "only 18+ female", we still want to parse)
-        # S12: Sexual Content (Might be mistakenly triggered by age requirements like "18+")
-        # Unknown: Fallback just in case format changes
         allowed_categories = {"S7", "S10", "S12", "Unknown"}
 
         if flagged_cats and flagged_cats.issubset(allowed_categories):
@@ -262,9 +291,7 @@ async def score_resume(
                 },
             )
 
-
-
-    # Build scoring prompt
+    # 7. Build scoring prompt
     job_context = ""
     if job_title and job_description:
         job_context = f"""
@@ -285,7 +312,10 @@ Analyze this resume and return a JSON object with the following structure:
   "grammar_score": <0-100>,
   "strengths": ["...", "..."],
   "weaknesses": ["...", "..."],
-  "suggestions": ["...", "..."],
+  "suggestions": [
+    {{"current": "What is currently in the resume", "suggested": "The improved suggestion"}},
+    ...
+  ],
   "feedback": {{
     "summary": "...",
     "ats": "...",
@@ -303,7 +333,7 @@ Resume Text:
 Return ONLY the JSON object. No other text.
 """
 
-    # Call NVIDIA API with retries and schema validation
+    # 8. Call NVIDIA API with retries and schema validation
     try:
         score_data = await ai_call_with_retries(prompt, schema_validator=validate_score_schema, model=NVIDIA_MODEL)
     except Exception as e:
@@ -316,16 +346,17 @@ Return ONLY the JSON object. No other text.
             },
         )
 
-
-
-
-
     overall_score = score_data.get("overall_score", 0)
 
     return JSONResponse({
         "success": True,
         "filename": file.filename,
         "grade": get_letter_grade(overall_score),
+        "stats": {
+            "pages": num_pages,
+            "word_count": words,
+            "word_count_optimal": word_count_optimal
+        },
         "scores": {
             "overall": overall_score,
             "ats": score_data.get("ats_score"),
@@ -341,4 +372,21 @@ Return ONLY the JSON object. No other text.
         "job_match": score_data.get("job_match"),
     })
 
+@app.post("/api/score-resume")
+async def score_resume(file: UploadFile = File(...)):
+    """Score only the resume without a job description."""
+    return await process_resume_scoring(file)
 
+@app.post("/api/score-job-match")
+async def score_job_match(
+    file: UploadFile = File(...),
+    job_title: str = Form(...),
+    job_description: str = Form(...),
+):
+    """Score the resume against a specific job title and job description."""
+    if not job_title or not job_title.strip():
+        raise HTTPException(status_code=400, detail="Job title is required for this endpoint.")
+    if not job_description or not job_description.strip():
+        raise HTTPException(status_code=400, detail="Job description is required for this endpoint.")
+        
+    return await process_resume_scoring(file, job_title, job_description)
