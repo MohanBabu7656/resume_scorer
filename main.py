@@ -8,7 +8,7 @@ import asyncio
 import json
 import re
 ## from supabase import create_client, Client
-import PyPDF2
+import fitz  # PyMuPDF
 import io
 from dotenv import load_dotenv
 load_dotenv()
@@ -32,11 +32,13 @@ RETRY_BASE_SECONDS = 1
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> tuple[str, int]:
-    reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
     text = ""
-    num_pages = len(reader.pages)
-    for page in reader.pages:
-        text += page.extract_text() or ""
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        num_pages = len(doc)
+        for page in doc:
+            extracted = page.get_text()
+            if extracted:
+                text += extracted + "\n"
     return text.strip(), num_pages
 
 
@@ -112,8 +114,8 @@ def validate_score_schema(obj: dict) -> (bool, str):
         if not isinstance(obj["suggestions"], list):
             return False, "'suggestions' must be a list"
         for item in obj["suggestions"]:
-            if not isinstance(item, dict) or "current" not in item or "suggested" not in item:
-                return False, "'suggestions' items must be objects with 'current' and 'suggested' keys"
+            if not isinstance(item, dict) or "current" not in item or "suggested" not in item or "reason" not in item:
+                return False, "'suggestions' items must be objects with 'current', 'suggested', and 'reason' keys"
 
     return True, ""
 
@@ -319,7 +321,7 @@ Include a "job_match" object with: match_score (0-100), matched_keywords (list),
 """
 
     prompt = f"""
-Analyze this resume and return a JSON object with the following structure:
+You are an expert ATS specialist, technical recruiter, and executive resume writer. Analyze this resume and return a JSON object with the following structure:
 {{
   "overall_score": <0-100>,
   "ats_score": <0-100>,
@@ -330,8 +332,12 @@ Analyze this resume and return a JSON object with the following structure:
   "strengths": ["...", "..."],
   "weaknesses": ["...", "..."],
   "suggestions": [
-    {{"current": "What is currently in the resume", "suggested": "The improved suggestion"}},
-    ...
+    {{
+      "section": "Experience",
+      "current": "Exact quote of the original flawed sentence",
+      "suggested": "Complete, polished rewrite ready to be copy-pasted",
+      "reason": "Clear explanation of the exact difference, why it is better, and any technical corrections made"
+    }}
   ],
   "feedback": {{
     "summary": "...",
@@ -343,19 +349,22 @@ Analyze this resume and return a JSON object with the following structure:
   }}{",\n  \"job_match\": {{\"match_score\": 0, \"matched_keywords\": [], \"missing_keywords\": []}}" if job_context else ""}
 }}
 
-IMPORTANT INSTRUCTIONS FOR SUGGESTIONS:
-1. FOCUS ONLY on substantive content improvements (e.g., adding quantifiable metrics, using stronger action verbs, improving descriptions for impact).
-2. IGNORE spacing, punctuation, and minor formatting errors. Do not suggest removing double colons (::), extra spaces, special characters, or PDF text extraction artifacts.
-3. NEVER suggest changing factual information such as dates, names, or locations (e.g., do not suggest changing "May 2025" to "Mar 2024").
-4. EMPLOYMENT GAPS & OVERLAPS: Carefully analyze the chronological work history. If there are significant unexplained gaps (e.g., >6 months) or overlapping dates that seem erroneous, provide a specific suggestion to clarify or format them better, but do not invent dates.
-5. TAILOR SUGGESTIONS: If the resume lacks a dedicated "Skills" section, suggest adding one. If it lacks a "Summary" or "Objective" and could benefit from it, suggest it. If bullets are too passive (e.g., "Responsible for"), suggest active verbs (e.g., "Spearheaded").
-6. AVOID NITPICKING: Only provide high-value suggestions. If a bullet is already good, do not suggest minor stylistic tweaks.
+CRITICAL INSTRUCTIONS FOR SUGGESTIONS:
+1. ONLY High-Value Improvements: Focus on the most critical weak points, especially technical inaccuracies, poor phrasing, or weak impact.
+2. ACTIONABLE & SPECIFIC REWRITES: Never give vague advice. You MUST provide the fully rewritten, professional sentence in the "suggested" field. 
+3. EXACT QUOTES: "current" MUST be a verbatim copy-paste from the resume text so the user knows exactly what you are changing.
+4. EXPLAIN THE DIFFERENCE: In the "reason" field, explicitly state what changed between "current" and "suggested" and why the new version is stronger.
+5. TECHNICAL ACCURACY & CONTEXT: Identify and correct technical mistakes or incorrect terminology based on the candidate's profile (e.g., fixing "Java Script" to "JavaScript", correcting misused tools, or adding relevant technical context that aligns with their overall experience). 
+6. METRICS & IMPACT: Transform task-based bullets into achievement-based bullets. Use action verbs and insert placeholders (e.g., "[Metric]%") if specific numbers are missing but logically belong.
+7. ATS OPTIMIZATION: Naturally weave in missing industry keywords if a job description is provided, or standard industry terms if not.
+8. IGNORE PARSING ARTIFACTS: Disregard bad spacing, missing spaces, or weird symbols. Fix them in your rewrite silently.
+9. Limit suggestions to the top 3-5 most impactful rewrites.
 
 Resume Text:
 {resume_text[:5000]}
 {job_context}
 
-Return ONLY the JSON object. No other text.
+Return ONLY the valid JSON object. Do not include markdown formatting like ```json or any conversational text.
 """
 
     # 8. Call NVIDIA API with retries and schema validation
