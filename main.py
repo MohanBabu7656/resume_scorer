@@ -424,8 +424,8 @@ async def score_resume(file: UploadFile = File(...)):
 @app.post("/api/score-job-match")
 async def score_job_match(
     file: UploadFile = File(...),
-    job_title: str = Form(...),
-    job_description: str = Form(...),
+    job_title: str = Form(default=""),
+    job_description: str = Form(default=""),
 ):
     """Score the resume against a specific job title and job description."""
     if not job_title or not job_title.strip():
