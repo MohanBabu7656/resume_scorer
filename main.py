@@ -428,9 +428,13 @@ async def score_job_match(
     job_description: str = Form(default=""),
 ):
     """Score the resume against a specific job title and job description."""
+    missing = []
     if not job_title or not job_title.strip():
-        raise HTTPException(status_code=400, detail="Job title is required for this endpoint.")
+        missing.append("Job title")
     if not job_description or not job_description.strip():
-        raise HTTPException(status_code=400, detail="Job description is required for this endpoint.")
+        missing.append("Job description")
+        
+    if missing:
+        raise HTTPException(status_code=400, detail=f"{' and '.join(missing)} {'are' if len(missing) > 1 else 'is'} required for this endpoint.")
         
     return await process_resume_scoring(file, job_title, job_description)
